@@ -1259,7 +1259,7 @@ init_session()
 # ─────────────────────────────────────────────────────────────
 if st.session_state.user is None:
     st.markdown("""
-    <div style="text-align:center; padding: 60px 20px;">
+    <div style="text-align:center; padding: 60px 20px 30px;">
         <div style="font-family:'Barlow Condensed',sans-serif; font-size:64px; font-weight:900;
                     letter-spacing:8px; color:#f97316; text-shadow: 0 0 40px #f9731650;">
             IRONFORGE
@@ -1270,11 +1270,10 @@ if st.session_state.user is None:
     </div>
     """, unsafe_allow_html=True)
 
-    lc, mc, rc = st.columns([1, 1, 1])
+    _, mc, _ = st.columns([1, 1, 1])
     with mc:
-        st.markdown('<div class="if-card if-card-highlight" style="padding:32px;">', unsafe_allow_html=True)
-        st.markdown('<div style="font-family:\'Barlow Condensed\';font-size:22px;font-weight:800;color:#f97316;text-align:center;margin-bottom:20px;">ENTER YOUR NAME</div>', unsafe_allow_html=True)
-        username = st.text_input("Username", placeholder="e.g. AthleteJohn", label_visibility="collapsed")
+        st.markdown("### Enter your name to continue")
+        username = st.text_input("Your name", placeholder="e.g. AthleteJohn")
         if st.button("⚡ ENTER THE FORGE", use_container_width=True):
             if username.strip():
                 user = db_get_user(username.strip()) or db_create_user(username.strip())
@@ -1282,7 +1281,6 @@ if st.session_state.user is None:
                 st.rerun()
             else:
                 st.error("Please enter a username.")
-        st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
 # ─────────────────────────────────────────────────────────────
