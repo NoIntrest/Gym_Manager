@@ -6,6 +6,7 @@ PostgreSQL (Supabase) · 120+ Exercises · Muscle Diagrams · YouTube Links · E
 import streamlit as st
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 import json
 import os
 import datetime
@@ -191,7 +192,7 @@ hr { border-color: #1e1e28 !important; }
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────
-# DATABASE LAYER  — PostgreSQL via psycopg2 (Supabase / Neon)
+# DATABASE LAYER  — PostgreSQL via psycopg2 + connection pool
 # Set DATABASE_URL env var to your Supabase connection string
 # ─────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -200,10 +201,29 @@ if not DATABASE_URL:
     st.error("⚠️ DATABASE_URL environment variable is not set. Please add your Supabase connection string in Render → Environment.")
     st.stop()
 
+@st.cache_resource
+def get_pool():
+    """
+    Create a ThreadedConnectionPool once and reuse it across all Streamlit reruns.
+    min=1 keeps one connection warm; max=5 allows up to 5 concurrent users.
+    st.cache_resource caches this at the server level — not per session.
+    """
+    return psycopg2.pool.ThreadedConnectionPool(
+        minconn=1,
+        maxconn=5,
+        dsn=DATABASE_URL,
+    )
+
 @contextmanager
 def get_db():
-    """Open a psycopg2 connection using RealDictCursor so rows behave like dicts."""
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    """
+    Borrow a connection from the pool, yield it, then return it.
+    Uses RealDictCursor so rows behave like dicts.
+    Falls back to a fresh connection if the pool is exhausted.
+    """
+    pool = get_pool()
+    conn = pool.getconn()
+    conn.cursor_factory = psycopg2.extras.RealDictCursor
     try:
         yield conn
         conn.commit()
@@ -211,7 +231,7 @@ def get_db():
         conn.rollback()
         raise e
     finally:
-        conn.close()
+        pool.putconn(conn)
 
 def _exec(conn, sql, params=()):
     """Execute a single statement and return the cursor."""
