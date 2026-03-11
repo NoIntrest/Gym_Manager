@@ -1,10 +1,11 @@
 """
 IronForge 3.0 — Advanced Gym Tracker
-SQLite Database · 120+ Exercises · Muscle Diagrams · YouTube Links · Enhanced Gamification
+PostgreSQL (Supabase) · 120+ Exercises · Muscle Diagrams · YouTube Links · Enhanced Gamification
 """
 
 import streamlit as st
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import json
 import os
 import datetime
@@ -190,15 +191,19 @@ hr { border-color: #1e1e28 !important; }
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────
-# DATABASE LAYER
+# DATABASE LAYER  — PostgreSQL via psycopg2 (Supabase / Neon)
+# Set DATABASE_URL env var to your Supabase connection string
 # ─────────────────────────────────────────────────────────────
-DB_PATH = os.environ.get("IRONFORGE_DB", "ironforge.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+if not DATABASE_URL:
+    st.error("⚠️ DATABASE_URL environment variable is not set. Please add your Supabase connection string in Render → Environment.")
+    st.stop()
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    """Open a psycopg2 connection using RealDictCursor so rows behave like dicts."""
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         yield conn
         conn.commit()
@@ -208,24 +213,29 @@ def get_db():
     finally:
         conn.close()
 
-def init_db():
-    with get_db() as conn:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            username      TEXT    UNIQUE NOT NULL,
-            created_at    TEXT    DEFAULT (date('now')),
-            total_xp      INTEGER DEFAULT 0,
-            level         INTEGER DEFAULT 0,
-            streak        INTEGER DEFAULT 0,
-            longest_streak INTEGER DEFAULT 0,
-            last_workout_date TEXT,
-            bodyweight_unit TEXT DEFAULT 'kg'
-        );
+def _exec(conn, sql, params=()):
+    """Execute a single statement and return the cursor."""
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    return cur
 
-        CREATE TABLE IF NOT EXISTS workouts (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id         INTEGER NOT NULL,
+def init_db():
+    """Create all tables if they don't exist. Safe to run on every startup."""
+    tables = [
+        """CREATE TABLE IF NOT EXISTS users (
+            id                SERIAL PRIMARY KEY,
+            username          TEXT    UNIQUE NOT NULL,
+            created_at        TEXT    DEFAULT CURRENT_DATE,
+            total_xp          INTEGER DEFAULT 0,
+            level             INTEGER DEFAULT 0,
+            streak            INTEGER DEFAULT 0,
+            longest_streak    INTEGER DEFAULT 0,
+            last_workout_date TEXT,
+            bodyweight_unit   TEXT    DEFAULT 'kg'
+        )""",
+        """CREATE TABLE IF NOT EXISTS workouts (
+            id              SERIAL PRIMARY KEY,
+            user_id         INTEGER NOT NULL REFERENCES users(id),
             date            TEXT    NOT NULL,
             total_sets      INTEGER DEFAULT 0,
             total_xp        INTEGER DEFAULT 0,
@@ -235,125 +245,112 @@ def init_db():
             note            TEXT,
             duration_min    INTEGER DEFAULT 0,
             muscles_trained TEXT,
-            exercise_count  INTEGER DEFAULT 0,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS workout_exercises (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            workout_id      INTEGER NOT NULL,
+            exercise_count  INTEGER DEFAULT 0
+        )""",
+        """CREATE TABLE IF NOT EXISTS workout_exercises (
+            id              SERIAL PRIMARY KEY,
+            workout_id      INTEGER NOT NULL REFERENCES workouts(id),
             exercise_id     INTEGER NOT NULL,
             exercise_name   TEXT    NOT NULL,
             muscle_group    TEXT,
             sets_completed  INTEGER DEFAULT 0,
             weight_used     REAL,
-            reps_completed  TEXT,
-            FOREIGN KEY (workout_id) REFERENCES workouts(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS personal_records (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id       INTEGER NOT NULL,
+            reps_completed  TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS personal_records (
+            id            SERIAL PRIMARY KEY,
+            user_id       INTEGER NOT NULL REFERENCES users(id),
             exercise_id   INTEGER NOT NULL,
             exercise_name TEXT    NOT NULL,
             weight        REAL,
             reps          INTEGER,
             one_rep_max   REAL,
-            date          TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS bodyweight_log (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            date          TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS bodyweight_log (
+            id      SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id),
             date    TEXT    NOT NULL,
-            weight  REAL    NOT NULL,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS badges_earned (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER NOT NULL,
-            badge_id   TEXT    NOT NULL,
-            earned_at  TEXT    DEFAULT (date('now')),
-            UNIQUE(user_id, badge_id),
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS daily_challenges (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id      INTEGER NOT NULL,
+            weight  REAL    NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS badges_earned (
+            id        SERIAL PRIMARY KEY,
+            user_id   INTEGER NOT NULL REFERENCES users(id),
+            badge_id  TEXT    NOT NULL,
+            earned_at TEXT    DEFAULT CURRENT_DATE,
+            UNIQUE(user_id, badge_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS daily_challenges (
+            id           SERIAL PRIMARY KEY,
+            user_id      INTEGER NOT NULL REFERENCES users(id),
             date         TEXT    NOT NULL,
             challenge_id TEXT    NOT NULL,
             completed    INTEGER DEFAULT 0,
             completed_at TEXT,
-            UNIQUE(user_id, date, challenge_id),
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS xp_log (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            UNIQUE(user_id, date, challenge_id)
+        )""",
+        """CREATE TABLE IF NOT EXISTS xp_log (
+            id      SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id),
             date    TEXT    NOT NULL,
             amount  INTEGER NOT NULL,
-            source  TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS muscle_stats (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER NOT NULL,
+            source  TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS muscle_stats (
+            id         SERIAL PRIMARY KEY,
+            user_id    INTEGER NOT NULL REFERENCES users(id),
             muscle     TEXT    NOT NULL,
             total_sets INTEGER DEFAULT 0,
-            UNIQUE(user_id, muscle),
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS unique_exercises (
-            user_id     INTEGER NOT NULL,
+            UNIQUE(user_id, muscle)
+        )""",
+        """CREATE TABLE IF NOT EXISTS unique_exercises (
+            user_id     INTEGER NOT NULL REFERENCES users(id),
             exercise_id TEXT    NOT NULL,
-            PRIMARY KEY(user_id, exercise_id),
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        );
-        """)
+            PRIMARY KEY(user_id, exercise_id)
+        )""",
+    ]
+    with get_db() as conn:
+        for ddl in tables:
+            _exec(conn, ddl)
 
 init_db()
 
 # ─── DB helpers ───────────────────────────────────────────────
 def db_get_user(username):
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+        cur = _exec(conn, "SELECT * FROM users WHERE username=%s", (username,))
+        row = cur.fetchone()
         return dict(row) if row else None
 
 def db_create_user(username):
     with get_db() as conn:
-        conn.execute("INSERT OR IGNORE INTO users(username) VALUES(?)", (username,))
+        _exec(conn, "INSERT INTO users(username) VALUES(%s) ON CONFLICT(username) DO NOTHING", (username,))
     return db_get_user(username)
 
 def db_update_user(user_id, **kwargs):
     if not kwargs: return
-    sets = ", ".join(f"{k}=?" for k in kwargs)
+    sets = ", ".join(f"{k}=%s" for k in kwargs)
     vals = list(kwargs.values()) + [user_id]
     with get_db() as conn:
-        conn.execute(f"UPDATE users SET {sets} WHERE id=?", vals)
+        _exec(conn, f"UPDATE users SET {sets} WHERE id=%s", vals)
 
 def db_save_workout(user_id, date, total_sets, total_xp, base_xp, bonus_xp, multiplier,
                      note, duration_min, muscles, exercise_count, exercises):
     with get_db() as conn:
-        cur = conn.execute(
+        cur = _exec(conn,
             """INSERT INTO workouts
                (user_id,date,total_sets,total_xp,base_xp,bonus_xp,xp_multiplier,
                 note,duration_min,muscles_trained,exercise_count)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (user_id, date, total_sets, total_xp, base_xp, bonus_xp, multiplier,
              note, duration_min, json.dumps(muscles), exercise_count)
         )
-        wid = cur.lastrowid
+        wid = cur.fetchone()["id"]
         for ex in exercises:
-            conn.execute(
+            _exec(conn,
                 """INSERT INTO workout_exercises
                    (workout_id,exercise_id,exercise_name,muscle_group,sets_completed,weight_used,reps_completed)
-                   VALUES(?,?,?,?,?,?,?)""",
+                   VALUES(%s,%s,%s,%s,%s,%s,%s)""",
                 (wid, ex.get("id", 0), ex["name"], ex.get("muscle",""), ex["sets"],
                  ex.get("weight_used", None), ex.get("reps",""))
             )
@@ -361,117 +358,127 @@ def db_save_workout(user_id, date, total_sets, total_xp, base_xp, bonus_xp, mult
 
 def db_get_workouts(user_id, limit=100):
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM workouts WHERE user_id=? ORDER BY date DESC LIMIT ?",
+        cur = _exec(conn,
+            "SELECT * FROM workouts WHERE user_id=%s ORDER BY date DESC LIMIT %s",
             (user_id, limit)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 def db_get_workout_exercises(workout_id):
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM workout_exercises WHERE workout_id=?", (workout_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        cur = _exec(conn,
+            "SELECT * FROM workout_exercises WHERE workout_id=%s", (workout_id,)
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 def db_save_pr(user_id, exercise_id, exercise_name, weight, reps):
     orm = weight * (1 + reps / 30.0) if reps and weight else None
     with get_db() as conn:
-        existing = conn.execute(
-            "SELECT id FROM personal_records WHERE user_id=? AND exercise_id=?",
+        cur = _exec(conn,
+            "SELECT id FROM personal_records WHERE user_id=%s AND exercise_id=%s",
             (user_id, exercise_id)
-        ).fetchone()
+        )
+        existing = cur.fetchone()
         if existing:
-            conn.execute(
-                "UPDATE personal_records SET weight=?,reps=?,one_rep_max=?,date=? WHERE id=?",
+            _exec(conn,
+                "UPDATE personal_records SET weight=%s,reps=%s,one_rep_max=%s,date=%s WHERE id=%s",
                 (weight, reps, orm, str(datetime.date.today()), existing["id"])
             )
         else:
-            conn.execute(
-                "INSERT INTO personal_records(user_id,exercise_id,exercise_name,weight,reps,one_rep_max,date) VALUES(?,?,?,?,?,?,?)",
+            _exec(conn,
+                """INSERT INTO personal_records
+                   (user_id,exercise_id,exercise_name,weight,reps,one_rep_max,date)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s)""",
                 (user_id, exercise_id, exercise_name, weight, reps, orm, str(datetime.date.today()))
             )
 
 def db_get_prs(user_id):
     with get_db() as conn:
-        rows = conn.execute("SELECT * FROM personal_records WHERE user_id=?", (user_id,)).fetchall()
-        return {str(r["exercise_id"]): dict(r) for r in rows}
+        cur = _exec(conn, "SELECT * FROM personal_records WHERE user_id=%s", (user_id,))
+        return {str(r["exercise_id"]): dict(r) for r in cur.fetchall()}
 
 def db_log_bodyweight(user_id, weight, date):
     with get_db() as conn:
-        conn.execute("INSERT INTO bodyweight_log(user_id,date,weight) VALUES(?,?,?)",
-                     (user_id, date, weight))
+        _exec(conn, "INSERT INTO bodyweight_log(user_id,date,weight) VALUES(%s,%s,%s)",
+              (user_id, date, weight))
 
 def db_get_bodyweight_log(user_id, limit=60):
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM bodyweight_log WHERE user_id=? ORDER BY date DESC LIMIT ?",
+        cur = _exec(conn,
+            "SELECT * FROM bodyweight_log WHERE user_id=%s ORDER BY date DESC LIMIT %s",
             (user_id, limit)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 def db_earn_badge(user_id, badge_id):
     with get_db() as conn:
-        conn.execute("INSERT OR IGNORE INTO badges_earned(user_id,badge_id) VALUES(?,?)",
-                     (user_id, badge_id))
+        _exec(conn,
+            "INSERT INTO badges_earned(user_id,badge_id) VALUES(%s,%s) ON CONFLICT DO NOTHING",
+            (user_id, badge_id)
+        )
 
 def db_get_badges(user_id):
     with get_db() as conn:
-        rows = conn.execute("SELECT badge_id FROM badges_earned WHERE user_id=?", (user_id,)).fetchall()
-        return [r["badge_id"] for r in rows]
+        cur = _exec(conn, "SELECT badge_id FROM badges_earned WHERE user_id=%s", (user_id,))
+        return [r["badge_id"] for r in cur.fetchall()]
 
 def db_log_xp(user_id, amount, source):
     with get_db() as conn:
-        conn.execute("INSERT INTO xp_log(user_id,date,amount,source) VALUES(?,?,?,?)",
-                     (user_id, str(datetime.date.today()), amount, source))
+        _exec(conn, "INSERT INTO xp_log(user_id,date,amount,source) VALUES(%s,%s,%s,%s)",
+              (user_id, str(datetime.date.today()), amount, source))
 
 def db_get_xp_log(user_id, limit=30):
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM xp_log WHERE user_id=? ORDER BY id DESC LIMIT ?",
+        cur = _exec(conn,
+            "SELECT * FROM xp_log WHERE user_id=%s ORDER BY id DESC LIMIT %s",
             (user_id, limit)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 def db_update_muscle_stats(user_id, muscle, sets_delta):
     with get_db() as conn:
-        conn.execute(
-            """INSERT INTO muscle_stats(user_id,muscle,total_sets) VALUES(?,?,?)
-               ON CONFLICT(user_id,muscle) DO UPDATE SET total_sets=total_sets+?""",
+        _exec(conn,
+            """INSERT INTO muscle_stats(user_id,muscle,total_sets) VALUES(%s,%s,%s)
+               ON CONFLICT(user_id,muscle) DO UPDATE SET total_sets=muscle_stats.total_sets+%s""",
             (user_id, muscle, sets_delta, sets_delta)
         )
 
 def db_get_muscle_stats(user_id):
     with get_db() as conn:
-        rows = conn.execute("SELECT * FROM muscle_stats WHERE user_id=?", (user_id,)).fetchall()
-        return {r["muscle"]: r["total_sets"] for r in rows}
+        cur = _exec(conn, "SELECT * FROM muscle_stats WHERE user_id=%s", (user_id,))
+        return {r["muscle"]: r["total_sets"] for r in cur.fetchall()}
 
 def db_track_unique_exercise(user_id, exercise_id):
     with get_db() as conn:
-        conn.execute("INSERT OR IGNORE INTO unique_exercises(user_id,exercise_id) VALUES(?,?)",
-                     (user_id, str(exercise_id)))
+        _exec(conn,
+            "INSERT INTO unique_exercises(user_id,exercise_id) VALUES(%s,%s) ON CONFLICT DO NOTHING",
+            (user_id, str(exercise_id))
+        )
 
 def db_count_unique_exercises(user_id):
     with get_db() as conn:
-        return conn.execute(
-            "SELECT COUNT(*) FROM unique_exercises WHERE user_id=?", (user_id,)
-        ).fetchone()[0]
+        cur = _exec(conn,
+            "SELECT COUNT(*) as cnt FROM unique_exercises WHERE user_id=%s", (user_id,)
+        )
+        return cur.fetchone()["cnt"]
 
 def db_get_challenges(user_id, date):
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM daily_challenges WHERE user_id=? AND date=?", (user_id, date)
-        ).fetchall()
-        return {r["challenge_id"]: dict(r) for r in rows}
+        cur = _exec(conn,
+            "SELECT * FROM daily_challenges WHERE user_id=%s AND date=%s", (user_id, date)
+        )
+        return {r["challenge_id"]: dict(r) for r in cur.fetchall()}
 
 def db_set_challenge(user_id, date, challenge_id, completed=False):
     with get_db() as conn:
         completed_at = str(datetime.datetime.now()) if completed else None
-        conn.execute(
+        _exec(conn,
             """INSERT INTO daily_challenges(user_id,date,challenge_id,completed,completed_at)
-               VALUES(?,?,?,?,?)
-               ON CONFLICT(user_id,date,challenge_id) DO UPDATE SET completed=?,completed_at=?""",
-            (user_id, date, challenge_id, int(completed), completed_at, int(completed), completed_at)
+               VALUES(%s,%s,%s,%s,%s)
+               ON CONFLICT(user_id,date,challenge_id)
+               DO UPDATE SET completed=%s, completed_at=%s""",
+            (user_id, date, challenge_id, int(completed), completed_at,
+             int(completed), completed_at)
         )
 
 # ─────────────────────────────────────────────────────────────
@@ -1306,9 +1313,8 @@ muscles_count   = len(muscle_stats)
 challenges_done_count = sum(1 for c in challenges_today.values() if c["completed"])
 challenges_done_total = 0
 with get_db() as conn:
-    challenges_done_total = conn.execute(
-        "SELECT COUNT(*) FROM daily_challenges WHERE user_id=? AND completed=1", (user_id,)
-    ).fetchone()[0]
+    cur = _exec(conn, "SELECT COUNT(*) as cnt FROM daily_challenges WHERE user_id=%s AND completed=1", (user_id,))
+    challenges_done_total = cur.fetchone()["cnt"]
 
 user_stats = {
     "total_xp": total_xp,
@@ -1766,10 +1772,8 @@ elif page == "📋 Today's Log":
                 # Week consistency check
                 week_ago = str(datetime.date.today() - datetime.timedelta(days=6))
                 with get_db() as conn:
-                    week_count = conn.execute(
-                        "SELECT COUNT(DISTINCT date) FROM workouts WHERE user_id=? AND date>=?",
-                        (user_id, week_ago)
-                    ).fetchone()[0]
+                    cur = _exec(conn, "SELECT COUNT(DISTINCT date) as cnt FROM workouts WHERE user_id=%s AND date>=%s", (user_id, week_ago))
+                    week_count = cur.fetchone()["cnt"]
                 if week_count >= 4:
                     earn_badge(user_id, "consistent", badges_earned)
 
@@ -1825,8 +1829,10 @@ elif page == "🎯 Daily Challenges":
     st.markdown("---")
     st.markdown("#### 📊 Challenge Stats")
     with get_db() as conn:
-        total_ch  = conn.execute("SELECT COUNT(*) FROM daily_challenges WHERE user_id=? AND completed=1", (user_id,)).fetchone()[0]
-        days_with_ch = conn.execute("SELECT COUNT(DISTINCT date) FROM daily_challenges WHERE user_id=? AND completed=1", (user_id,)).fetchone()[0]
+        cur1 = _exec(conn, "SELECT COUNT(*) as cnt FROM daily_challenges WHERE user_id=%s AND completed=1", (user_id,))
+        total_ch = cur1.fetchone()["cnt"]
+        cur2 = _exec(conn, "SELECT COUNT(DISTINCT date) as cnt FROM daily_challenges WHERE user_id=%s AND completed=1", (user_id,))
+        days_with_ch = cur2.fetchone()["cnt"]
     ch1, ch2, ch3 = st.columns(3)
     with ch1: st.metric("Total Completed", total_ch)
     with ch2: st.metric("Days With Challenges", days_with_ch)
@@ -2243,9 +2249,9 @@ elif page == "⚙️ Settings":
         with get_db() as conn:
             export_data = {
                 "user": dict(user),
-                "workouts": [dict(w) for w in conn.execute("SELECT * FROM workouts WHERE user_id=?", (user_id,)).fetchall()],
-                "prs": [dict(r) for r in conn.execute("SELECT * FROM personal_records WHERE user_id=?", (user_id,)).fetchall()],
-                "bodyweight": [dict(r) for r in conn.execute("SELECT * FROM bodyweight_log WHERE user_id=?", (user_id,)).fetchall()],
+                "workouts": [dict(w) for w in _exec(conn, "SELECT * FROM workouts WHERE user_id=%s", (user_id,)).fetchall()],
+                "prs": [dict(r) for r in _exec(conn, "SELECT * FROM personal_records WHERE user_id=%s", (user_id,)).fetchall()],
+                "bodyweight": [dict(r) for r in _exec(conn, "SELECT * FROM bodyweight_log WHERE user_id=%s", (user_id,)).fetchall()],
                 "badges": db_get_badges(user_id),
                 "muscle_stats": db_get_muscle_stats(user_id),
                 "exported_at": str(datetime.datetime.now()),
@@ -2268,8 +2274,8 @@ elif page == "⚙️ Settings":
                 if st.button("Import muscle stats only"):
                     for muscle, sets_count in imp.get("muscle_stats",{}).items():
                         with get_db() as conn:
-                            conn.execute(
-                                "INSERT INTO muscle_stats(user_id,muscle,total_sets) VALUES(?,?,?) ON CONFLICT(user_id,muscle) DO UPDATE SET total_sets=?",
+                            _exec(conn,
+                                "INSERT INTO muscle_stats(user_id,muscle,total_sets) VALUES(%s,%s,%s) ON CONFLICT(user_id,muscle) DO UPDATE SET total_sets=%s",
                                 (user_id, muscle, sets_count, sets_count)
                             )
                     st.success("✓ Muscle stats imported.")
@@ -2285,8 +2291,8 @@ elif page == "⚙️ Settings":
                 with get_db() as conn:
                     for tbl in ["workouts","workout_exercises","personal_records","bodyweight_log",
                                 "badges_earned","daily_challenges","xp_log","muscle_stats","unique_exercises"]:
-                        conn.execute(f"DELETE FROM {tbl} WHERE user_id=?", (user_id,))
-                    conn.execute("UPDATE users SET total_xp=0,level=0,streak=0,last_workout_date=NULL WHERE id=?", (user_id,))
+                        _exec(conn, f"DELETE FROM {tbl} WHERE user_id=%s", (user_id,))
+                    _exec(conn, "UPDATE users SET total_xp=0,level=0,streak=0,last_workout_date=NULL WHERE id=%s", (user_id,))
                 st.session_state.today_log = []
                 st.success("All data deleted.")
                 st.rerun()
